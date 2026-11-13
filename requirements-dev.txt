@@ -1,0 +1,4 @@
+# Test tools. Install after requirements.txt:
+#   pip install --no-deps -r requirements.txt
+#   pip install -r requirements-dev.txt
+pytest>=8
