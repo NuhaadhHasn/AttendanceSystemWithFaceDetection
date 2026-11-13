@@ -1,163 +1,134 @@
-import os
+"""Attendance system with face recognition: live camera window.
+
+Run `python encodeGenerator.py` once first, then `python main.py`.
+Press q or Esc (or close the window) to quit.
+"""
+import logging
 import pickle
-import cvzone
-import numpy as np
-import cv2
+import sys
+import time
 from datetime import datetime
-import face_recognition
+from functools import partial
 
-import firebase_admin
-from firebase_admin import credentials
-from firebase_admin import db
-from firebase_admin import storage
+import cv2
 
-cred = credentials.Certificate("serviceAccountKey.json")
-firebase_admin.initialize_app(cred, {
-    'databaseURL': 'https://attendancewithfacerecogn-5cfbb-default-rtdb.firebaseio.com/',
-    'storageBucket': 'attendancewithfacerecogn-5cfbb.appspot.com'
-})
+import config
+from attendance import AttendanceSession, Frame, load_employee_photo
+from recognition import find_faces, identify
+from store import FirebaseStore
+from ui import CAM_H, CAM_W, compose
 
-bucket = storage.bucket()
+log = logging.getLogger("attendance")
 
-cap = cv2.VideoCapture(0)
-cap.set(3, 640)
-cap.set(4, 480)
+WINDOW = "Attendance With Face Recognition"
 
-imgBackground = cv2.imread('Resources/background.png')
 
-# Importing Mode images into a list
-modePath = 'Resources/Modes'
-modePathList = os.listdir(modePath)
-modeImgLists = []
-for path in modePathList:
-    modeImgLists.append(cv2.imread(os.path.join(modePath, path)))
+def load_assets():
+    """Load the window background and the four status-panel images."""
+    background = cv2.imread(str(config.BACKGROUND_IMAGE))
+    modes = [cv2.imread(str(config.MODES_DIR / f"{i}.png")) for i in range(1, 5)]
+    if background is None or any(m is None for m in modes):
+        raise FileNotFoundError(
+            f"Missing UI images. Expected {config.BACKGROUND_IMAGE} and 1.png-4.png in {config.MODES_DIR}."
+        )
+    return background, modes
 
-# Load the encoding file
-print("Loading Encoded File ...")
-file = open("EncodeFile.p", 'rb')
-encodeListKnownWithIds = pickle.load(file)
-file.close()
-encodeListKnown, employeeId = encodeListKnownWithIds
-print("Encoded File Loaded Successfully")
 
-modeType = 0
-counter = 0
-id = -1
-imgEmployee = []
+def load_encodings(path=config.ENCODINGS_FILE):
+    """Load (face encodings, employee ids) written by encodeGenerator.py."""
+    if not path.is_file():
+        raise FileNotFoundError(f"{path.name} not found. Run `python encodeGenerator.py` first.")
+    # SECURITY: unpickling can run arbitrary code. This file is produced locally by
+    # encodeGenerator.py and is git-ignored. Never load an EncodeFile.p from someone else.
+    with open(path, "rb") as f:
+        encodings, ids = pickle.load(f)
+    if len(encodings) == 0 or len(encodings) != len(ids):
+        raise ValueError(f"{path.name} is empty or corrupt. Re-run `python encodeGenerator.py`.")
+    return encodings, ids
 
-while True:
-    success, img = cap.read()
 
-    # making the image smaller, to make the process faster
-    imgSmall = cv2.resize(img, (0, 0), None, 0.25, 0.25)
-    # saving the face from cam in rgb, so it works in the face recognition
-    imgSmall = cv2.cvtColor(imgSmall, cv2.COLOR_BGR2RGB)
+def run(capture, session, assets, known, show, clock=datetime.now, max_frames=None,
+        max_read_failures=30):
+    """Main loop. Returns a process exit code.
 
-    faceCurFrame = face_recognition.face_locations(imgSmall)
-    encodeCurFrame = face_recognition.face_encodings(imgSmall, faceCurFrame)
+    capture: object with read() -> (ok, frame)
+    show:    show(image) -> True when the user asked to quit
+    """
+    background, modes = assets
+    known_encodings, known_ids = known
+    failures = 0
+    frames = 0
 
-    imgBackground[162:162 + 480, 55:55 + 640] = img
-    imgBackground[44:44 + 633, 808:808 + 414] = modeImgLists[modeType]
+    while True:
+        ok, img = capture.read()
+        if not ok or img is None:
+            failures += 1
+            if failures >= max_read_failures:
+                log.error("The camera stopped delivering frames.")
+                return 1
+            time.sleep(0.05)
+            continue
+        failures = 0
+        if img.shape[:2] != (CAM_H, CAM_W):
+            img = cv2.resize(img, (CAM_W, CAM_H))
 
-    if faceCurFrame:
-        for encodeFace, faceLoc in zip(encodeCurFrame, faceCurFrame):
-            matches = face_recognition.compare_faces(encodeListKnown,
-                                                     encodeFace)  # finding true or false of matching faces
-            faceDis = face_recognition.face_distance(encodeListKnown, encodeFace)  # finding the least index
-            print(f"Matches :{matches}")
-            print(f"FaceDis :{faceDis}")
+        boxes, employee_id = [], None
+        for encoding, box in find_faces(img):
+            matched = identify(encoding, known_encodings, known_ids, config.MATCH_TOLERANCE)
+            if matched is not None:
+                boxes.append(box)
+                employee_id = employee_id or matched
 
-            matchIndex = np.argmin(faceDis)  # get index of the matching face from the list
-            # print(f"Match Index {matchIndex}")
-            if matches[matchIndex]:
-                # print("Know Face Detected")
-                # print(employeeId[matchIndex])
-                y1, x2, y2, x1 = faceLoc  # to get the mark around the face
-                y1, x2, y2, x1 = y1 * 4, x2 * 4, y2 * 4, x1 * 4  # getting back default size after we made it smaller
-                bbox = 55 + x1, 162 + y1, x2 - x1, y2 - y1
-                imgBackground = cvzone.cornerRect(imgBackground, bbox, rt=0)
-                # imgBackground = cv2.rectangle(imgBackground,(y1,x1), (y1+ x2, y2+ x1), (255, 0, 0), 2 )
+        def show_loading():
+            show(compose(background, img, modes, Frame(), boxes, loading=True))
 
-                id = employeeId[matchIndex]
-                # print(id)
+        frame = session.update(employee_id, clock(), on_loading=show_loading)
+        if show(compose(background, img, modes, frame, boxes)):
+            return 0
 
-                if counter == 0:
-                    cvzone.putTextRect(imgBackground, "Loading", (275,400))
-                    cv2.imshow("Attendance With Face Recognition", imgBackground)
-                    cv2.waitKey(1)
-                    counter = 1
-                    modeType = 1
+        frames += 1
+        if max_frames is not None and frames >= max_frames:
+            return 0
 
-        if counter != 0:
 
-            if counter == 1:
-                # Get Employee Data
-                employeeInfo = db.reference(f'Employees/{id}').get()
-                print(employeeInfo)
-                # Get the image from the db
-                blob = bucket.get_blob(f'Images/{id}.png')
-                testTring = blob.download_as_string()
-                array = np.frombuffer(blob.download_as_string(), np.uint8)
-                imgEmployee = cv2.imdecode(array, cv2.COLOR_BGRA2BGR)
-                # Mark Attendance
-                datetimeObject = datetime.strptime(employeeInfo['Last_Attendance_Time'],
-                                                   "%Y-%m-%d %H:%M:%S")
-                secondsElapsed = (datetime.now() - datetimeObject).total_seconds()
-                print(secondsElapsed)
-                # if secondsElapsed > 86400: # Update after 24 hours of last update
-                if secondsElapsed > 30:  # Update after 30 seconds of last update
-                    ref = db.reference(f'Employees/{id}')
-                    employeeInfo['Total_Attendance'] += 1
-                    ref.child('Total_Attendance').set(employeeInfo['Total_Attendance'])
-                    ref.child('Last_Attendance_Time').set(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-                else:
-                    modeType = 3
-                    counter = 0
-                    imgBackground[44:44 + 633, 808:808 + 414] = modeImgLists[modeType]
+def _window_show(image):
+    cv2.imshow(WINDOW, image)
+    key = cv2.waitKey(1) & 0xFF
+    if key in (ord("q"), 27):
+        return True
+    try:
+        return cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1  # window closed
+    except cv2.error:
+        return True
 
-            if modeType != 3:
 
-                if 10 < counter < 20:
-                    modeType = 2
+def main():
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    try:
+        assets = load_assets()
+        known = load_encodings()
+        store = FirebaseStore()
+    except (FileNotFoundError, ValueError) as exc:
+        log.error("%s", exc)
+        return 1
 
-                imgBackground[44:44 + 633, 808:808 + 414] = modeImgLists[modeType]
+    capture = cv2.VideoCapture(config.CAMERA_INDEX)
+    if not capture.isOpened():
+        log.error("Could not open camera %d. Check it is connected and not used by another app.",
+                  config.CAMERA_INDEX)
+        return 1
+    capture.set(3, CAM_W)
+    capture.set(4, CAM_H)
 
-                if counter <= 10:
-                    # Replacing the data from the interface
-                    cv2.putText(imgBackground, str(employeeInfo['Total_Attendance']), (861, 125),
-                                cv2.FONT_HERSHEY_COMPLEX, 1, (255, 255, 255), 1)
-                    cv2.putText(imgBackground, str(employeeInfo['Occupation']), (1006, 550),
-                                cv2.FONT_HERSHEY_COMPLEX, 0.4, (255, 255, 255), 1)
-                    cv2.putText(imgBackground, str(id), (1006, 493),
-                                cv2.FONT_HERSHEY_COMPLEX, 0.5, (255, 255, 255), 1)
-                    cv2.putText(imgBackground, str(employeeInfo['Employee_Standard']), (910, 625),
-                                cv2.FONT_HERSHEY_COMPLEX, 0.6, (100, 100, 100), 1)
-                    cv2.putText(imgBackground, str(employeeInfo['Total_Working_Years']), (1025, 625),
-                                cv2.FONT_HERSHEY_COMPLEX, 0.6, (100, 100, 100), 1)
-                    cv2.putText(imgBackground, str(employeeInfo['Joined_Year']), (1125, 625),
-                                cv2.FONT_HERSHEY_COMPLEX, 0.6, (100, 100, 100), 1)
+    photo_loader = partial(load_employee_photo, bucket=store.bucket())
+    session = AttendanceSession(store, photo_loader)
+    log.info("Ready. Look at the camera. Press q to quit.")
+    try:
+        return run(capture, session, assets, known, _window_show)
+    finally:
+        capture.release()
+        cv2.destroyAllWindows()
 
-                    (w, h), _ = cv2.getTextSize(employeeInfo['Name'], cv2.FONT_HERSHEY_COMPLEX, 1, 1)
-                    offset = (414 - w) // 2
 
-                    cv2.putText(imgBackground, str(employeeInfo['Name']), (808 + offset, 445),
-                                cv2.FONT_HERSHEY_COMPLEX, 1, (50, 50, 50), 1)
-
-                    imgBackground[175:175 + 216, 909:909 + 216] = imgEmployee
-
-                counter += 1
-
-                if counter >= 20:
-                    counter = 0
-                    modeType = 0
-                    employeeInfo = []
-                    imgEmployee = []
-                    imgBackground[44:44 + 633, 808:808 + 414] = modeImgLists[modeType]
-
-    else:
-        modeType = 0
-        counter = 0
-
-    # cv2.imshow("Webcam", img)
-    cv2.imshow("Attendance With Face Recognition", imgBackground)
-    cv2.waitKey(1)
+if __name__ == "__main__":
+    sys.exit(main())

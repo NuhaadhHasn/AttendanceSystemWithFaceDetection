@@ -1,18 +1,15 @@
-import firebase_admin
-from firebase_admin import credentials
-from firebase_admin import db
+"""Write the employee records below to Firebase Realtime Database.
 
-cred = credentials.Certificate("serviceAccountKey.json")
-firebase_admin.initialize_app(cred, {
-    'databaseURL' : 'https://attendancewithfacerecogn-5cfbb-default-rtdb.firebaseio.com/'
-})
-
-ref = db.reference('Employees')
+WARNING: this REPLACES each listed record, including Total_Attendance and
+Last_Attendance_Time. To change only some fields of an existing record, use
+TestingUpdateAndAdd.py instead.
+"""
+from store import init_firebase
 
 data = {
     "001": {
         "Name": "Nuhaadh Hassan",
-        "Occupation" : "Software Engineer",
+        "Occupation": "Software Engineer",
         "Joined_Year": 2021,
         "Total_Attendance": 50,
         "Last_Attendance_Time": "2023-10-11 18:04:55",
@@ -21,7 +18,7 @@ data = {
     },
     "002": {
         "Name": "Emily Blunt",
-        "Occupation" : "Actress",
+        "Occupation": "Actress",
         "Joined_Year": 2021,
         "Total_Attendance": 5,
         "Last_Attendance_Time": "2023-10-11 18:04:55",
@@ -30,7 +27,7 @@ data = {
     },
     "003": {
         "Name": "Elon Musk",
-        "Occupation" : "Entrepreneur",
+        "Occupation": "Entrepreneur",
         "Joined_Year": 2021,
         "Total_Attendance": 7,
         "Last_Attendance_Time": "2023-10-11 18:04:55",
@@ -39,7 +36,7 @@ data = {
     },
     "004": {
         "Name": "Abed Ahmed",
-        "Occupation" : "Software Engineer",
+        "Occupation": "Software Engineer",
         "Joined_Year": 2023,
         "Total_Attendance": 30,
         "Last_Attendance_Time": "2023-10-11 18:04:55",
@@ -48,7 +45,7 @@ data = {
     },
     "005": {
         "Name": "Shakeer Ahmed",
-        "Occupation" : "Network Engineer",
+        "Occupation": "Network Engineer",
         "Joined_Year": 2018,
         "Total_Attendance": 20,
         "Last_Attendance_Time": "2023-10-03 18:04:55",
@@ -57,10 +54,16 @@ data = {
     },
 }
 
-# Add new Record
-for key,value in data.items():
-    ref.child(key).set(value)
 
-# if you need to update records, you can use the below code
-# for key, value in data.items():
-#     ref.child(key).update(value)
+def main():
+    init_firebase()
+    from firebase_admin import db
+
+    ref = db.reference("Employees")
+    for key, value in data.items():
+        ref.child(key).set(value)
+        print(f"Wrote employee {key}: {value['Name']}")
+
+
+if __name__ == "__main__":
+    main()
