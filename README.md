@@ -40,8 +40,9 @@ webcam frame ──► shrink to 1/4 size ──► detect face + 128-d encoding
                                                └─► no : "Already marked"
 ```
 
-- **`encodeGenerator.py`** reads every photo in `Images/`, uploads it to Firebase Storage, computes the face encodings, and saves them (with the employee IDs) to `EncodeFile.p`.
-- **`main.py`** runs the live recognition loop and draws the UI on top of `Resources/background.png` using the four state screens in `Resources/Modes/`.
+- **`encodeGenerator.py`** reads every photo in `Images/`, computes the face encodings and saves them (with the employee IDs) to `EncodeFile.p`. It can also back the photos up to Firebase Storage, which is optional.
+- **`main.py`** runs the live recognition loop. The profile is fetched and attendance written **once per sighting**; the on-screen steps (profile → marked) then advance by wall-clock time, so behaviour doesn't depend on how fast your computer processes frames.
+- Employee photos come from the local `Images/` folder, so the app works without Firebase Storage. Storage is only a fallback.
 - The UI has four states: **Active** (waiting), **profile** (details), **Marked**, and **Already marked**.
 
 ## Tech stack
@@ -51,20 +52,26 @@ webcam frame ──► shrink to 1/4 size ──► detect face + 128-d encoding
 | Language | Python 3.9 |
 | Computer vision | OpenCV, cvzone, NumPy |
 | Face recognition | `face_recognition` (dlib) |
-| Backend | Firebase Realtime Database + Firebase Storage (`firebase-admin`) |
+| Backend | Firebase Realtime Database (`firebase-admin`); Storage optional |
+| Tests | pytest |
 
 ## Project structure
 
 ```
-├── main.py                   # Live recognition + attendance UI
-├── encodeGenerator.py        # Builds EncodeFile.p and uploads photos to Storage
+├── main.py                   # Live camera loop and window
+├── attendance.py             # Attendance rules + on-screen state machine
+├── recognition.py            # Face detection and matching
+├── ui.py                     # Drawing the window
+├── store.py                  # Firebase access
+├── config.py                 # All settings (Firebase URLs, cool-down, camera, ...)
+├── encodeGenerator.py        # Builds EncodeFile.p from Images/
 ├── AddData.py                # Seeds the Employees records in Firebase
 ├── TestingUpdateAndAdd.py    # Example of adding / updating a record
-├── requirements.txt
+├── requirements.txt          # Runtime dependencies (pinned)
+├── requirements-dev.txt      # Test tools
 ├── Images/                   # Employee photos, named by ID (001.png, 002.png, ...)
-├── Resources/
-│   ├── background.png        # Main window layout
-│   └── Modes/                # Right-hand panel for each UI state
+├── Resources/                # Window background + the four status panels
+├── tests/                    # Automated tests
 └── docs/screenshots/         # Images used in this README
 ```
 
@@ -72,11 +79,11 @@ webcam frame ──► shrink to 1/4 size ──► detect face + 128-d encoding
 
 ### Prerequisites
 
-- Windows, macOS or Linux with a webcam
+- A webcam
 - **Python 3.9** (the version this project was developed and tested with)
-- **CMake and a C++ compiler** — `dlib` is compiled during install
-  (on Windows install *Visual Studio Build Tools* with the "Desktop development with C++" workload)
 - A Firebase project (see below)
+
+No C++ compiler or CMake is needed: `requirements.txt` installs a prebuilt `dlib`.
 
 ### 1. Clone and install
 
@@ -85,26 +92,27 @@ git clone https://github.com/NuhaadhHasn/AttendanceSystemWithFaceDetection.git
 cd AttendanceSystemWithFaceDetection
 
 python -m venv venv
-# Windows:  venv\Scripts\activate
+# Windows:      venv\Scripts\activate
 # macOS/Linux:  source venv/bin/activate
 
-pip install -r requirements.txt
+pip install --no-deps -r requirements.txt
 ```
+
+`--no-deps` is intentional: every dependency is pinned in the file, and it stops `face-recognition` from trying to compile `dlib` from source. If there is no prebuilt wheel for your platform, install CMake and a C++ compiler and replace `dlib-bin` with `dlib==19.24.2` in `requirements.txt`.
 
 ### 2. Set up Firebase
 
 1. Create a project in the [Firebase console](https://console.firebase.google.com/).
-2. Enable **Realtime Database** and **Storage**.
-   Firebase Storage requires the *Blaze* (pay-as-you-go) plan; without billing enabled, requests fail with `403 ... billing account ... is disabled`.
+2. Enable **Realtime Database**.
 3. Go to **Project settings → Service accounts → Generate new private key** and save the file in the project root as **`serviceAccountKey.json`**.
-4. In `main.py`, `encodeGenerator.py` and `AddData.py`, replace `databaseURL` and `storageBucket` with your own project's values.
+4. Put your project's database URL in `config.py` (or set the `FIREBASE_DATABASE_URL` environment variable).
+5. *(Optional)* Firebase Storage is only used to back up the photos. It requires the *Blaze* (pay-as-you-go) plan; without billing, uploads fail with `403 ... billing account ... is disabled`, which the app tolerates.
 
 > **Never commit `serviceAccountKey.json`.** It gives full admin access to your Firebase project. It is listed in `.gitignore`; keep it that way.
 
 ### 3. Add employees
 
-1. Put each face photo in `Images/`, named by employee ID (e.g. `001.png`).
-   Photos must be **216 × 216 px** — the profile card has a fixed size.
+1. Put each face photo in `Images/`, named by employee ID (e.g. `001.png`). Use a clear, front-facing photo. Photos are resized to 216 × 216 px on screen.
 2. Add the matching record to the `data` dictionary in `AddData.py`:
 
    ```python
@@ -125,13 +133,16 @@ pip install -r requirements.txt
    python AddData.py
    ```
 
+   > `AddData.py` **replaces** each listed record, including its attendance count. To change only some fields of an existing record, use `TestingUpdateAndAdd.py`.
+
 ### 4. Generate the face encodings
 
 ```bash
-python encodeGenerator.py
+python encodeGenerator.py              # encode and back up photos to Storage
+python encodeGenerator.py --no-upload  # encode only, no Firebase Storage needed
 ```
 
-This uploads the photos to Storage and creates `EncodeFile.p`. Re-run it whenever you add or change a photo.
+This creates `EncodeFile.p`. Photos with no detectable face are skipped with a warning. Re-run it whenever you add or change a photo.
 
 ### 5. Run
 
@@ -139,15 +150,21 @@ This uploads the photos to Storage and creates `EncodeFile.p`. Re-run it wheneve
 python main.py
 ```
 
-Look at the camera. The window shows the live feed on the left and the status panel on the right.
+Look at the camera. The window shows the live feed on the left and the status panel on the right. Press **q** or **Esc** (or close the window) to quit.
 
 ## Configuration
 
-| What | Where | Default |
+Everything lives in `config.py`, and each value can be overridden with an environment variable.
+
+| Setting | Environment variable | Default |
 |---|---|---|
-| Re-marking cool-down | `main.py`, `if secondsElapsed > 30` | 30 seconds (demo value; a commented-out line shows the 24-hour production value) |
-| Camera index | `main.py`, `cv2.VideoCapture(0)` | first webcam |
-| Face-match strictness | `face_recognition.compare_faces(...)` | library default tolerance, 0.6 |
+| Re-marking cool-down (seconds) | `COOLDOWN_SECONDS` | `30` (demo value; use `86400` for real daily attendance) |
+| Camera index | `CAMERA_INDEX` | `0` (first webcam) |
+| Face-match strictness | `MATCH_TOLERANCE` | `0.6` (lower is stricter) |
+| Firebase database URL | `FIREBASE_DATABASE_URL` | project default |
+| Service account key path | `SERVICE_ACCOUNT_KEY` | `serviceAccountKey.json` |
+
+Example (PowerShell): `$env:COOLDOWN_SECONDS = 86400; python main.py`
 
 ## Database schema
 
@@ -163,12 +180,27 @@ Look at the camera. The window shows the live feed on the left and the status pa
 | `Employee_Standard` | string | `"G"` |
 | `Total_Working_Years` | number | `2` |
 
+## Tests
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest
+```
+
+The suite covers the attendance rules (cool-down, once-per-sighting writes, error handling), photo loading, face matching, the encoder, the window drawing, and a full end-to-end run of the real loop using a simulated camera and an in-memory database. No webcam or Firebase connection is needed.
+
 ## Troubleshooting
 
-- **`dlib` fails to install** — install CMake and the C++ build tools first, then re-run `pip install -r requirements.txt`.
-- **`FileNotFoundError: EncodeFile.p`** — run `python encodeGenerator.py` first.
-- **`403 ... billing account ... is disabled`** — Firebase Storage needs the Blaze plan.
-- **Black or wrong camera** — change the index in `cv2.VideoCapture(0)`.
+- **`EncodeFile.p not found`** — run `python encodeGenerator.py` first.
+- **`Firebase key not found`** — save your service-account key as `serviceAccountKey.json` in the project root (step 2).
+- **`Could not open camera`** — check the camera is connected and not in use by another app, or set `CAMERA_INDEX`.
+- **`403 ... billing account ... is disabled`** — Firebase Storage needs the Blaze plan. It is optional: encode with `--no-upload` and the app reads photos from `Images/`.
+- **`pip install` tries to compile dlib** — use `pip install --no-deps -r requirements.txt` as shown above.
+- **`pip check` says `face-recognition requires dlib, which is not installed`** — expected and harmless. The prebuilt package is named `dlib-bin` but provides the same `dlib` module (`python -c "import dlib"` works).
+
+## License
+
+[MIT](LICENSE)
 
 ## Author
 
