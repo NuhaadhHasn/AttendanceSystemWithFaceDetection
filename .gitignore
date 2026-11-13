@@ -1,0 +1,22 @@
+# --- Secrets: NEVER commit these ---
+serviceAccountKey.json
+*-firebase-adminsdk-*.json
+*.pem
+.env
+
+# --- Generated at runtime (rebuild with encodeGenerator.py) ---
+# Pickle of face encodings; unpickling untrusted files can execute code.
+EncodeFile.p
+
+# --- Python / environments ---
+venv/
+venvTest/
+.venv/
+__pycache__/
+*.pyc
+
+# --- IDE / OS ---
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
